@@ -18,6 +18,7 @@ use crate::module::icecast_input::IcecastInput;
 use crate::module::mixer::Mixer;
 use crate::module::oscillator::Oscillator;
 use crate::module::output_device::OutputDevice;
+use crate::module::webaudio_device::WebAudioDevice;
 use crate::module::plotter::Plotter;
 use crate::module::trigger::Trigger;
 use crate::util::{stop_propagation, prevent_default, Sequence};
@@ -467,6 +468,7 @@ impl Workspace {
             ("Mixer (4 channel)", ModuleParams::Mixer(MixerParams::with_channels(4))),
             ("Mixer (8 channel)", ModuleParams::Mixer(MixerParams::with_channels(8))),
             ("Output Device", ModuleParams::OutputDevice(OutputDeviceParams { device: None, left: None, right: None })),
+            ("Web Audio Device", ModuleParams::WebAudioDevice(())),
             ("Plotter", ModuleParams::Plotter(())),
             ("FM Sine", ModuleParams::FmSine(FmSineParams { freq_lo: 90.0, freq_hi: 110.0 })),
             ("Amplifier", ModuleParams::Amplifier(AmplifierParams { amplitude: 1.0, mod_depth: 0.5 })),
@@ -725,6 +727,13 @@ impl Window {
             ModuleParams::OutputDevice(params) => {
                 if let Some(Indication::OutputDevice(indic)) = &self.props.indication {
                     html! { <OutputDevice id={self.props.id} module={self.link.clone()} params={params} indication={indic} /> }
+                } else {
+                    html! {}
+                }
+            }
+            ModuleParams::WebAudioDevice(_) => {
+                if let Some(Indication::WebAudioDevice(indic)) = &self.props.indication {
+                    html! { <WebAudioDevice id={self.props.id} module={self.link.clone()} indication={indic} /> }
                 } else {
                     html! {}
                 }

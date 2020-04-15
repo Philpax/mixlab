@@ -88,6 +88,7 @@ gen_modules!{
     mixer::Mixer,
     oscillator::Oscillator,
     output_device::OutputDevice,
+    webaudio_device::WebAudioDevice,
     plotter::Plotter,
     stereo_panner::StereoPanner,
     stereo_splitter::StereoSplitter,

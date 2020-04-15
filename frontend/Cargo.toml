@@ -35,6 +35,12 @@ web-sys = { version = "0.3", features = [
     "Navigator",
     "WebSocket",
     "WheelEvent",
+    "AudioBuffer",
+    "AudioBufferSourceNode",
+    "AudioContext",
+    "AudioContextOptions",
+    "AudioDestinationNode",
+    "ScriptProcessorNode"
     ] }
 
 # The `console_error_panic_hook` crate provides better debugging of panics by

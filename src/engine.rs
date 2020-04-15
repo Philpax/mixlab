@@ -191,6 +191,9 @@ impl Engine {
             connections: Vec::new(),
             inputs: Vec::new(),
             outputs: Vec::new(),
+            channels: CHANNELS,
+            sample_rate: SAMPLE_RATE,
+            samples_per_tick: SAMPLES_PER_TICK,
         };
 
         for (module_id, module) in &self.modules {
@@ -214,7 +217,7 @@ impl Engine {
         state
     }
 
-    fn log_op(&mut self, op: ServerUpdate) {
+    pub fn log_op(&mut self, op: ServerUpdate) {
         let _ = self.log_tx.send(EngineOp::ServerUpdate(op));
     }
 
@@ -426,6 +429,15 @@ impl Engine {
             for (i, buffer) in output_buffers.into_iter().enumerate(){
                 buffers.insert(OutputId(*module_id, i), buffer);
             }
+        }
+
+        let webaudio_device = self.modules.iter().find({|p| match p {
+            (_, Module::WebAudioDevice(_)) => true,
+            _ => false
+        }});
+        if let Some((id, _module)) = webaudio_device {
+            let buffer = buffers.get(&OutputId(*id, 0)).expect("expected output buffer").to_vec();
+            self.log_op(ServerUpdate::AudioData(buffer));
         }
 
         indications

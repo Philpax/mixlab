@@ -6,5 +6,6 @@ pub mod icecast_input;
 pub mod mixer;
 pub mod oscillator;
 pub mod output_device;
+pub mod webaudio_device;
 pub mod plotter;
 pub mod trigger;

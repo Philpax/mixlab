@@ -20,6 +20,9 @@ pub struct WorkspaceState {
     pub connections: Vec<(InputId, OutputId)>,
     pub inputs: Vec<(ModuleId, Vec<Terminal>)>,
     pub outputs: Vec<(ModuleId, Vec<Terminal>)>,
+    pub channels: usize,
+    pub sample_rate: usize,
+    pub samples_per_tick: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -57,6 +60,7 @@ pub enum ServerUpdate {
     DeleteModule(ModuleId),
     CreateConnection(InputId, OutputId),
     DeleteConnection(InputId),
+    AudioData(Vec<Sample>),
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialOrd, Ord, PartialEq, Eq, Hash)]
@@ -142,6 +146,7 @@ pub enum ModuleParams {
     Mixer(MixerParams),
     Oscillator(OscillatorParams),
     OutputDevice(OutputDeviceParams),
+    WebAudioDevice(()),
     Plotter(()),
     StereoPanner(()),
     StereoSplitter(()),
@@ -158,6 +163,7 @@ pub enum Indication {
     Mixer(()),
     Oscillator(()),
     OutputDevice(OutputDeviceIndication),
+    WebAudioDevice(()),
     Plotter(PlotterIndication),
     StereoPanner(()),
     StereoSplitter(()),
