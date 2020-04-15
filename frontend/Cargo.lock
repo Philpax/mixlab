@@ -103,6 +103,7 @@ dependencies = [
  "lazy_static",
  "mixlab-protocol",
  "plotters",
+ "ringbuf",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -374,6 +375,12 @@ checksum = "2bdc6c187c65bca4260c9011c9e3132efe4909da44726bad24cf7572ae338d7f"
 dependencies = [
  "proc-macro2",
 ]
+
+[[package]]
+name = "ringbuf"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c2b29d87cfbdce39849012bb5020fff88b8f01f4f5b55846a0b6ef360774eae"
 
 [[package]]
 name = "ryu"

@@ -13,12 +13,14 @@ use std::rc::Rc;
 
 use gloo_events::EventListener;
 use wasm_bindgen::prelude::*;
-use web_sys::{Element, AudioContext, AudioContextOptions, AudioBuffer, AudioBufferSourceNode};
+use wasm_bindgen::JsCast;
+use web_sys::{Element, AudioContext, AudioContextOptions, ScriptProcessorNode, AudioProcessingEvent};
 use yew::format::Binary;
 use yew::services::websocket::{WebSocketService, WebSocketStatus, WebSocketTask};
 use yew::{html, Component, ComponentLink, Html, ShouldRender};
+use ringbuf::{RingBuffer, Consumer, Producer};
 
-use mixlab_protocol::{ClientMessage, WorkspaceState, ServerMessage, ModuleId, InputId, OutputId, ModuleParams, WindowGeometry, ServerUpdate, Indication, Terminal, ClientOp, ClientSequence};
+use mixlab_protocol::{ClientMessage, WorkspaceState, ServerMessage, ModuleId, InputId, OutputId, ModuleParams, WindowGeometry, ServerUpdate, Indication, Terminal, ClientOp, ClientSequence, Sample};
 
 use util::Sequence;
 use workspace::Workspace;
@@ -27,7 +29,8 @@ use workspace::Workspace;
 
 pub struct App {
     link: ComponentLink<Self>,
-    websocket: WebSocketTask,
+    websocket_data: WebSocketTask,
+    websocket_audio: WebSocketTask,
     state: Option<Rc<RefCell<State>>>,
     client_seq: Sequence,
     server_seq: Option<ClientSequence>,
@@ -35,9 +38,7 @@ pub struct App {
     viewport_width: usize,
     viewport_height: usize,
     audio_ctx: Option<AudioContext>,
-    audio_buffer: Option<AudioBuffer>,
-    audio_buffer_source_node: Option<AudioBufferSourceNode>,
-    audio_buffers: Vec<Vec<f32>>,
+    audio_buffers: Vec<Producer<f32>>,
     // must be kept alive while app is running:
     _resize_listener: EventListener,
 }
@@ -86,6 +87,7 @@ pub enum AppMsg {
     WindowResize,
     ServerMessage(ServerMessage),
     ClientUpdate(ClientOp),
+    AudioData(Vec<Sample>)
 }
 
 #[wasm_bindgen]
@@ -102,9 +104,9 @@ impl Component for App {
         let mut websocket = WebSocketService::new();
 
         let host = yew::utils::host().expect("expected host from yew");
-        let ws_path = format!("ws://{}/session", host);
 
-        let websocket = websocket.connect_binary(&ws_path,
+        let ws_path = format!("ws://{}/session", host);
+        let websocket_data = websocket.connect_binary(&ws_path,
             link.callback(|msg: Binary| {
                 match msg {
                     Ok(buff) => {
@@ -125,6 +127,28 @@ impl Component for App {
             }))
         .expect("websocket.connect_binary");
 
+        let ws_audio_path = format!("ws://{}/session_audio", host);
+        let websocket_audio = websocket.connect_binary(&ws_audio_path,
+            link.callback(|msg: Binary| {
+                match msg {
+                    Ok(buff) => {
+                        let msg = bincode::deserialize::<Vec<Sample>>(&buff)
+                            .expect("bincode::deserialize");
+
+                        AppMsg::AudioData(msg)
+                    }
+                    Err(e) => {
+                        crate::log!("websocket audio recv error: {:?}", e);
+                        AppMsg::NoOp
+                    }
+                }
+            }),
+            link.callback(|status: WebSocketStatus| {
+                crate::log!("websocket status: {:?}", status);
+                AppMsg::NoOp
+            }))
+        .expect("websocket_audio.connect_binary");
+
         let window = web_sys::window()
             .expect("window");
 
@@ -142,15 +166,14 @@ impl Component for App {
 
         App {
             link,
-            websocket,
+            websocket_data,
+            websocket_audio,
             state: None,
             client_seq: Sequence::new(),
             server_seq: None,
             root_element,
             viewport_width,
             viewport_height,
-            audio_buffer: None,
-            audio_buffer_source_node: None,
             audio_ctx: None,
             audio_buffers: vec![],
             _resize_listener: resize_listener,
@@ -158,11 +181,6 @@ impl Component for App {
     }
 
     fn update(&mut self, msg: Self::Message) -> ShouldRender {
-        let mut temp_buffer = vec![0.0 as f32; 44100];
-        for elem in temp_buffer.iter_mut() {
-            *elem = (random() * 2.0 - 1.0) as f32;
-        }
-
         match msg {
             AppMsg::NoOp => false,
             AppMsg::WindowResize => {
@@ -181,35 +199,44 @@ impl Component for App {
 
                         self.state = Some(Rc::new(RefCell::new(state.into())));
 
+                        self.audio_buffers.clear();
+
+                        let mut ring_buffer_receivers = vec![];
+                        for _ in 0..channels {
+                            let ring_buffer = RingBuffer::<f32>::new(131072);
+                            let (prod, cons) = ring_buffer.split();
+
+                            self.audio_buffers.push(prod);
+                            ring_buffer_receivers.push(cons);
+                        }
+
                         let audio_context = AudioContext::new_with_context_options(
                             AudioContextOptions::new().sample_rate(sample_rate as f32)
                         ).expect("failed to create audio context");
-                        let audio_buffer = audio_context.create_buffer(
-                            channels as u32,
-                            sample_rate as u32,
-                            sample_rate as f32
-                        ).expect("failed to create audio buffer");
+                        let spn = audio_context.create_script_processor_with_buffer_size(256).expect("failed to create script processor");
 
-                        let audio_buffer_source_node = audio_context.create_buffer_source().expect("failed to create buffer source");
-                        audio_buffer_source_node.set_buffer(Some(&audio_buffer));
-                        audio_buffer_source_node.connect_with_audio_node(&audio_context.destination()).expect("failed to connect to destination");
-                        audio_buffer_source_node.set_loop(true);
-                        let mut temp_buffer = vec![0.0 as f32; 44100];
-                        for elem in temp_buffer.iter_mut() {
-                            *elem = 0.0;
-                        }
-                        audio_buffer.copy_to_channel(&mut temp_buffer, 0 as i32).expect("should be able to copy to channel");
-                        audio_buffer.copy_to_channel(&mut temp_buffer, 1 as i32).expect("should be able to copy to channel");
-                        audio_buffer_source_node.start().expect("failed to start");
+                        // create callback
+                        let audioprocess_callback = Closure::wrap(Box::new(move |e: AudioProcessingEvent| {
+                            let output_buffer = e.output_buffer().expect("failed to get output buffer");
+
+                            for channel in 0..output_buffer.number_of_channels() {
+                                let mut data: Vec<f32> = vec![0.0; output_buffer.length() as usize];
+
+                                let receiver = &mut ring_buffer_receivers[channel as usize];
+                                // if receiver.len() > data.len() {
+                                    receiver.pop_slice(&mut data);
+                                // }
+
+                                output_buffer.copy_to_channel(&mut data, channel as i32).expect("failed to copy channel data");
+                            }
+                        }) as Box<dyn FnMut(AudioProcessingEvent)>);
+                        spn.set_onaudioprocess(Some(audioprocess_callback.as_ref().unchecked_ref()));
+                        audioprocess_callback.forget();
+
+                        spn.connect_with_audio_node(&audio_context.destination()).expect("failed to connect audio node");
 
                         self.audio_ctx = Some(audio_context);
-                        self.audio_buffer = Some(audio_buffer);
-                        self.audio_buffer_source_node = Some(audio_buffer_source_node);
 
-                        self.audio_buffers.clear();
-                        for _ in 0..channels {
-                            self.audio_buffers.push(vec![]);
-                        }
                         true
                     }
                     ServerMessage::Sync(seq) => {
@@ -236,9 +263,6 @@ impl Component for App {
                                 state.indications.insert(id, indication);
                                 state.inputs.insert(id, inputs);
                                 state.outputs.insert(id, outputs);
-
-                        self.audio_buffer.as_ref().unwrap().copy_to_channel(&mut temp_buffer, 0 as i32).expect("should be able to copy to channel");
-                        self.audio_buffer.as_ref().unwrap().copy_to_channel(&mut temp_buffer, 1 as i32).expect("should be able to copy to channel");
                             }
                             ServerUpdate::UpdateModuleParams(id, new_params) => {
                                 if let Some(params) = state.modules.get_mut(&id) {
@@ -268,22 +292,6 @@ impl Component for App {
                             ServerUpdate::DeleteConnection(input) => {
                                 state.connections.remove(&input);
                             }
-                            ServerUpdate::AudioData(data) => {
-                                if let Some(web_audio_buffer) = &self.audio_buffer {
-                                    for (channel_idx, channel_data) in data.chunks(state.samples_per_tick).enumerate() {
-                                        let audio_buffer = &mut self.audio_buffers[channel_idx as usize];
-                                        audio_buffer.extend_from_slice(channel_data);
-                                        if audio_buffer.len() > state.sample_rate {
-                                            audio_buffer.drain(0..(audio_buffer.len() - state.sample_rate));
-                                        }
-
-                                        // let mut temp_buffer = audio_buffer.clone();
-
-                                        // crate::log!("updating channel {} with {} samples", channel_idx, channel_data.len());
-                                        web_audio_buffer.copy_to_channel(&mut temp_buffer, channel_idx as i32).expect("should be able to copy to channel");
-                                    }
-                                }
-                            }
                         }
 
                         // only re-render according to server state if all of
@@ -291,6 +299,17 @@ impl Component for App {
                         self.synced()
                     },
                 }
+            }
+            AppMsg::AudioData(data) => {
+                let state = self.state.as_ref();
+                if let Some(state) = state {
+                    let samples_per_tick = state.borrow().samples_per_tick;
+                    for (channel_idx, channel_data) in data.chunks(samples_per_tick).enumerate() {
+                        self.audio_buffers[channel_idx as usize].push_slice(channel_data);
+                    }
+                }
+
+                false
             }
             AppMsg::ClientUpdate(op) => {
                 let msg = ClientMessage {
@@ -301,7 +320,7 @@ impl Component for App {
                 let packet = bincode::serialize(&msg)
                     .expect("bincode::serialize");
 
-                let _ = self.websocket.send_binary(Ok(packet));
+                let _ = self.websocket_data.send_binary(Ok(packet));
 
                 false
             }

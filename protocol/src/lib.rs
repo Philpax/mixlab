@@ -59,8 +59,7 @@ pub enum ServerUpdate {
     UpdateModuleIndication(ModuleId, Indication),
     DeleteModule(ModuleId),
     CreateConnection(InputId, OutputId),
-    DeleteConnection(InputId),
-    AudioData(Vec<Sample>),
+    DeleteConnection(InputId)
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialOrd, Ord, PartialEq, Eq, Hash)]

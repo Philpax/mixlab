@@ -35,7 +35,7 @@ impl PartialOrd for OpClock {
 
 pub const CHANNELS: usize = 2;
 pub const SAMPLE_RATE: usize = 44100;
-const TICKS_PER_SECOND: usize = 100;
+const TICKS_PER_SECOND: usize = 50;
 const SAMPLES_PER_TICK: usize = SAMPLE_RATE / TICKS_PER_SECOND;
 
 pub static ZERO_BUFFER_STEREO: [Sample; SAMPLES_PER_TICK * CHANNELS] = [0.0; SAMPLES_PER_TICK * CHANNELS];
@@ -43,8 +43,12 @@ pub static ZERO_BUFFER_STEREO: [Sample; SAMPLES_PER_TICK * CHANNELS] = [0.0; SAM
 pub static ZERO_BUFFER_MONO: [Sample; SAMPLES_PER_TICK] = [0.0; SAMPLES_PER_TICK];
 pub static ONE_BUFFER_MONO: [Sample; SAMPLES_PER_TICK] = [1.0; SAMPLES_PER_TICK];
 
+pub type EngineOps = broadcast::Receiver<EngineOp>;
+pub type EngineSamples = broadcast::Receiver<Vec<f32>>;
+
 pub enum EngineMessage {
     ConnectSession(oneshot::Sender<(SessionId, WorkspaceState, EngineOps)>),
+    ConnectAudio(oneshot::Sender<EngineSamples>),
     ClientMessage(SessionId, ClientMessage),
 }
 
@@ -60,11 +64,13 @@ pub struct EngineSession {
 pub fn start() -> EngineHandle {
     let (cmd_tx, cmd_rx) = mpsc::sync_channel(8);
     let (log_tx, _) = broadcast::channel(64);
+    let (audio_tx, _) = broadcast::channel(64);
 
     thread::spawn(move || {
         let mut engine = Engine {
             cmd_rx,
             log_tx,
+            audio_tx,
             session_seq: Sequence::new(),
             modules: HashMap::new(),
             geometry: HashMap::new(),
@@ -94,7 +100,6 @@ impl<T> From<TrySendError<T>> for EngineError {
     }
 }
 
-pub type EngineOps = broadcast::Receiver<EngineOp>;
 
 #[derive(Debug, Clone)]
 pub enum EngineOp {
@@ -114,6 +119,16 @@ impl EngineHandle {
             cmd_tx,
             session_id,
         }))
+    }
+
+    pub async fn connect_audio(&self) -> Result<EngineSamples, EngineError> {
+        let cmd_tx = self.cmd_tx.clone();
+
+        let (tx, rx) = oneshot::channel();
+        cmd_tx.try_send(EngineMessage::ConnectAudio(tx))?;
+        let sample_rx = rx.await.map_err(|_| EngineError::Stopped)?;
+
+        Ok(sample_rx)
     }
 }
 
@@ -135,6 +150,7 @@ impl EngineSession {
 pub struct Engine {
     cmd_rx: Receiver<EngineMessage>,
     log_tx: broadcast::Sender<EngineOp>,
+    audio_tx: broadcast::Sender<Vec<f32>>,
     session_seq: Sequence,
     modules: HashMap<ModuleId, Module>,
     geometry: HashMap<ModuleId, WindowGeometry>,
@@ -168,6 +184,7 @@ impl Engine {
 
                 match self.cmd_rx.recv_timeout(sleep_until - now) {
                     Ok(EngineMessage::ConnectSession(tx)) => { let _ = tx.send(self.connect_session()); }
+                    Ok(EngineMessage::ConnectAudio(tx)) => { let _ = tx.send(self.connect_audio()); }
                     Ok(EngineMessage::ClientMessage(session, msg)) => { self.client_update(session, msg); }
                     Err(RecvTimeoutError::Timeout) => { break; }
                     Err(RecvTimeoutError::Disconnected) => { return; }
@@ -181,6 +198,10 @@ impl Engine {
         let log_rx = self.log_tx.subscribe();
         let state = self.dump_state();
         (session_id, state, log_rx)
+    }
+
+    fn connect_audio(&mut self) -> EngineSamples {
+        self.audio_tx.subscribe()
     }
 
     fn dump_state(&self) -> WorkspaceState {
@@ -437,7 +458,7 @@ impl Engine {
         }});
         if let Some((id, _module)) = webaudio_device {
             let buffer = buffers.get(&OutputId(*id, 0)).expect("expected output buffer").to_vec();
-            self.log_op(ServerUpdate::AudioData(buffer));
+            let _ = self.audio_tx.send(buffer);
         }
 
         indications

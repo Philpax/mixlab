@@ -140,6 +140,37 @@ async fn session(websocket: WebSocket, engine: Arc<EngineHandle>) {
     }
 }
 
+async fn session_audio(websocket: WebSocket, engine: Arc<EngineHandle>) {
+    let (mut tx, _) = websocket.split();
+
+    let mut engine_audio = engine.connect_audio().await.expect("engine.connect_audio");
+
+    while let Some(event) = engine_audio.next().await {
+        match event {
+            Err(broadcast::RecvError::Lagged(skipped)) => {
+                println!("disconnecting client: lagged {} messages behind", skipped);
+                return;
+            }
+            Err(broadcast::RecvError::Closed) => {
+                // TODO we should tell the user that the engine has stopped
+                unimplemented!()
+            }
+            Ok(op) => {
+                let msg = bincode::serialize(&op)
+                    .expect("bincode::serialize");
+
+                match tx.send(ws::Message::binary(msg)).await {
+                    Ok(()) => {}
+                    Err(_) => {
+                        // client disconnected
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let engine = Arc::new(engine::start());
@@ -164,24 +195,38 @@ async fn main() {
             .or(js)
             .or(wasm));
 
-    let websocket = warp::get()
+    let engine_data = engine.clone();
+    let websocket_data = warp::get()
         .and(warp::path("session"))
         .and(warp::ws())
         .map(move |ws: Ws| {
-            let engine = engine.clone();
+            let engine_data = engine_data.clone();
             ws.on_upgrade(move |websocket| {
-                let engine = engine.clone();
+                let engine = engine_data.clone();
                 session(websocket, engine)
             })
         });
 
+    let engine_audio = engine.clone();
+    let websocket_audio = warp::get()
+        .and(warp::path("session_audio"))
+        .and(warp::ws())
+        .map(move |ws: Ws| {
+            let engine_audio = engine_audio.clone();
+            ws.on_upgrade(move |websocket| {
+                let engine = engine_audio.clone();
+                session_audio(websocket, engine)
+            })
+        });
+
     let routes = static_content
-        .or(websocket)
+        .or(websocket_data)
+        .or(websocket_audio)
         .with(warp::log("mixlab-http"));
 
     let warp = warp::serve(routes);
 
-    let listen_addr = "127.0.0.1:8000".parse::<SocketAddr>()
+    let listen_addr = "0.0.0.0:8000".parse::<SocketAddr>()
         .expect("parse SocketAddr");
 
     let mut listener = TcpListener::bind(&listen_addr).await
